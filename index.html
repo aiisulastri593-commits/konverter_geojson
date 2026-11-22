@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Konverter SHP / GeoJSON untuk Spectral Indices Explorer</title>
 <script src="https://unpkg.com/shpjs@4.0.4/dist/shp.min.js"></script>
+<script src="https://unpkg.com/proj4@2.9.2/dist/proj4.js"></script>
+<script src="https://unpkg.com/sql.js@1.10.3/dist/sql-wasm.js"></script>
 <style>
   :root { --blue:#4366A9; --bg:#f4f6fa; --line:#d5dbe6; --ink:#1f2937; --mute:#6b7280; }
   * { box-sizing:border-box; }
@@ -42,9 +44,13 @@
     <h2>1. Pilih file</h2>
     <div id="drop">
       <strong>Tarik file ke sini, atau klik untuk memilih</strong>
-      <span>Bisa .zip (shapefile lengkap), .geojson / .json, atau satu set .shp + .dbf + .prj sekaligus</span>
+      <span>Bisa .zip (shapefile lengkap), .geojson / .json, .gpkg (GeoPackage), atau satu set .shp + .dbf + .prj sekaligus</span>
     </div>
-    <input id="file" type="file" multiple accept=".zip,.shp,.dbf,.prj,.cpg,.geojson,.json" hidden>
+    <input id="file" type="file" multiple accept=".zip,.shp,.dbf,.prj,.cpg,.geojson,.json,.gpkg" hidden>
+    <div id="layerBox" class="meta" style="display:none;margin-top:10px">
+      <label>Layer GeoPackage: <select id="layerSel"></select></label>
+      <div id="layerInfo"></div>
+    </div>
     <div class="meta">Shapefile sebaiknya memuat .prj supaya koordinatnya otomatis diubah ke WGS84. Tanpa .prj, data dianggap sudah WGS84.</div>
   </div>
 
@@ -117,6 +123,121 @@
   }
   function ext(f) { return f.name.split('.').pop().toLowerCase(); }
 
+  // ================= GeoPackage (.gpkg) =================
+  var SQLJS_BASE = 'https://unpkg.com/sql.js@1.10.3/dist/';
+  var sqlPromise = null;
+  function getSQL() {
+    if (!sqlPromise) sqlPromise = initSqlJs({ locateFile: function (f) { return SQLJS_BASE + f; } });
+    return sqlPromise;
+  }
+
+  // Pembaca WKB (standar, ISO, dan EWKB); hanya x,y yang disimpan
+  function wkbReader(dv, start) {
+    var o = start;
+    function geom() {
+      var le = dv.getUint8(o) === 1; o += 1;
+      var t = dv.getUint32(o, le); o += 4;
+      var hasZ = (t & 0x80000000) !== 0, hasM = (t & 0x40000000) !== 0;
+      if (t & 0x20000000) o += 4; // SRID (EWKB)
+      t = t & 0x0FFFFFFF;
+      var iso = Math.floor(t / 1000);
+      if (iso === 1 || iso === 3) hasZ = true;
+      if (iso === 2 || iso === 3) hasM = true;
+      var base = t % 1000;
+      var dims = 2 + (hasZ ? 1 : 0) + (hasM ? 1 : 0);
+      function pt() { var x = dv.getFloat64(o, le), y = dv.getFloat64(o + 8, le); o += 8 * dims; return [x, y]; }
+      function cnt() { var n = dv.getUint32(o, le); o += 4; return n; }
+      function pts() { var n = cnt(), a = []; for (var i = 0; i < n; i++) a.push(pt()); return a; }
+      function rings() { var n = cnt(), a = []; for (var i = 0; i < n; i++) a.push(pts()); return a; }
+      function many() { var n = cnt(), a = []; for (var i = 0; i < n; i++) a.push(geom()); return a; }
+      switch (base) {
+        case 1: return { type: 'Point', coordinates: pt() };
+        case 2: return { type: 'LineString', coordinates: pts() };
+        case 3: return { type: 'Polygon', coordinates: rings() };
+        case 4: return { type: 'MultiPoint', coordinates: many().map(function (g) { return g.coordinates; }) };
+        case 5: return { type: 'MultiLineString', coordinates: many().map(function (g) { return g.coordinates; }) };
+        case 6: return { type: 'MultiPolygon', coordinates: many().map(function (g) { return g.coordinates; }) };
+        case 7: return { type: 'GeometryCollection', geometries: many() };
+        default: throw new Error('Tipe geometri WKB ' + t + ' belum didukung');
+      }
+    }
+    return geom;
+  }
+
+  // Blob geometri GeoPackage = header (magic "GP", flags, srs_id, envelope) + WKB
+  function decodeGpkgGeom(blob) {
+    if (!blob || !blob.length || blob.length < 9) return null;
+    var dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+    if (dv.getUint8(0) !== 0x47 || dv.getUint8(1) !== 0x50) return null;
+    var flags = dv.getUint8(3);
+    if ((flags >> 4) & 1) return null; // geometri kosong
+    var envSize = [0, 32, 48, 48, 64][(flags >> 1) & 7];
+    if (envSize === undefined) throw new Error('Header GeoPackage tidak dikenali');
+    return wkbReader(dv, 8 + envSize)();
+  }
+
+  function mapCoords(g, fn) {
+    if (!g) return g;
+    if (g.type === 'GeometryCollection') return { type: g.type, geometries: g.geometries.map(function (x) { return mapCoords(x, fn); }) };
+    function walk(c) { return typeof c[0] === 'number' ? fn(c) : c.map(walk); }
+    return { type: g.type, coordinates: walk(g.coordinates) };
+  }
+
+  var GEO_SAME = [4326, 4979, 4269, 4755, 4283, 7844];
+  function makeTransform(db, srid) {
+    if (srid === null || srid === undefined || srid <= 0 || GEO_SAME.indexOf(srid) >= 0) return null;
+    var def = null;
+    if (srid === 3857) def = 'EPSG:3857';
+    else if (srid >= 32601 && srid <= 32660) def = '+proj=utm +zone=' + (srid - 32600) + ' +datum=WGS84 +units=m +no_defs';
+    else if (srid >= 32701 && srid <= 32760) def = '+proj=utm +zone=' + (srid - 32700) + ' +south +datum=WGS84 +units=m +no_defs';
+    else {
+      var r = db.exec('SELECT definition FROM gpkg_spatial_ref_sys WHERE srs_id = ' + (srid | 0));
+      if (r.length && r[0].values.length) def = r[0].values[0][0];
+    }
+    if (!def || def === 'undefined') throw new Error('CRS EPSG:' + srid + ' tidak dikenali. Ekspor ke EPSG:4326 lewat QGIS.');
+    var tf;
+    try { tf = proj4(def, 'EPSG:4326'); }
+    catch (e) { throw new Error('CRS EPSG:' + srid + ' tidak bisa dibaca. Ekspor ke EPSG:4326 lewat QGIS.'); }
+    return function (c) { var p = tf.forward([c[0], c[1]]); return [p[0], p[1]]; };
+  }
+
+  function listLayers(db) {
+    var res = db.exec("SELECT c.table_name, g.column_name, g.geometry_type_name, g.srs_id FROM gpkg_contents c JOIN gpkg_geometry_columns g ON c.table_name = g.table_name WHERE c.data_type = 'features'");
+    if (!res.length) return [];
+    return res[0].values.map(function (v) { return { table: v[0], col: v[1], type: v[2], srs: v[3] }; });
+  }
+
+  function readLayer(db, layer) {
+    var tf = makeTransform(db, layer.srs);
+    var stmt = db.prepare('SELECT * FROM "' + String(layer.table).replace(/"/g, '""') + '"');
+    var feats = [];
+    try {
+      while (stmt.step()) {
+        var row = stmt.getAsObject();
+        var g = decodeGpkgGeom(row[layer.col]);
+        delete row[layer.col];
+        if (!g) continue;
+        if (tf) g = mapCoords(g, tf);
+        var props = {};
+        for (var k in row) if (!(row[k] instanceof Uint8Array)) props[k] = row[k];
+        feats.push({ type: 'Feature', properties: props, geometry: g });
+      }
+    } finally { stmt.free(); }
+    return { type: 'FeatureCollection', features: feats };
+  }
+
+  var gpkgDb = null, gpkgLayers = [];
+  function loadGpkgLayer(i) {
+    var L = gpkgLayers[i];
+    current = normalize(readLayer(gpkgDb, L));
+    $('layerInfo').textContent = 'Tipe: ' + L.type + ' | CRS asal: EPSG:' + L.srs + (GEO_SAME.indexOf(L.srs) >= 0 || L.srs <= 0 ? ' (dipakai apa adanya)' : ' (diubah ke WGS84)');
+    render();
+  }
+  $('layerSel').addEventListener('change', function () {
+    try { loadGpkgLayer(parseInt($('layerSel').value, 10)); }
+    catch (e) { say('Gagal membaca layer: ' + (e && e.message ? e.message : e), 'err'); }
+  });
+
   async function handle(list) {
     var files = Array.prototype.slice.call(list || []);
     if (!files.length) return;
@@ -125,6 +246,26 @@
     try {
       var byExt = {};
       files.forEach(function (f) { byExt[ext(f)] = f; });
+      $('layerBox').style.display = 'none';
+      if (byExt.gpkg) {
+        say('Membaca GeoPackage...', 'meta');
+        var SQL = await getSQL();
+        if (gpkgDb) { try { gpkgDb.close(); } catch (e2) {} }
+        gpkgDb = new SQL.Database(new Uint8Array(await readBuf(byExt.gpkg)));
+        gpkgLayers = listLayers(gpkgDb);
+        if (!gpkgLayers.length) { say('GeoPackage ini tidak punya layer vektor (fitur).', 'err'); return; }
+        var sel = $('layerSel');
+        sel.innerHTML = '';
+        gpkgLayers.forEach(function (L, i) {
+          var o = document.createElement('option');
+          o.value = i; o.textContent = L.table + ' (' + L.type + ')';
+          sel.appendChild(o);
+        });
+        $('layerBox').style.display = '';
+        $('layerBox').querySelector('label').style.display = gpkgLayers.length > 1 ? '' : 'none';
+        loadGpkgLayer(0);
+        return;
+      }
       var geo;
       if (byExt.zip) {
         geo = await shp(await readBuf(byExt.zip));
@@ -135,7 +276,7 @@
         if (byExt.dbf) parts.push(shp.parseDbf(await readBuf(byExt.dbf), byExt.cpg ? await readText(byExt.cpg) : undefined));
         geo = byExt.dbf ? shp.combine(parts) : { type: 'FeatureCollection', features: parts[0].map(function (g) { return { type: 'Feature', properties: {}, geometry: g }; }) };
       } else {
-        say('Tidak ada file yang dikenali. Pilih .zip, .geojson, atau .shp (+ .dbf + .prj).', 'err');
+        say('Tidak ada file yang dikenali. Pilih .zip, .geojson, .gpkg, atau .shp (+ .dbf + .prj).', 'err');
         return;
       }
       // shp(zip) bisa mengembalikan array FeatureCollection bila zip berisi beberapa layer
