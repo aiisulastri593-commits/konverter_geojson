@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Konverter SHP / GeoJSON untuk Spectral Indices Explorer</title>
+<title>File Converter for Spectral Indices Explorer</title>
 <script src="https://unpkg.com/shpjs@4.0.4/dist/shp.min.js"></script>
 <script src="https://unpkg.com/proj4@2.9.2/dist/proj4.js"></script>
 <script src="https://unpkg.com/sql.js@1.10.3/dist/sql-wasm.js"></script>
@@ -37,50 +37,50 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>Konverter SHP / GeoJSON</h1>
-  <p class="lead">Pendamping aplikasi <b>Spectral Indices Explorer</b> di Google Earth Engine. Pilih file dari komputer, hasilnya jadi teks GeoJSON yang tinggal ditempel ke aplikasi. File diproses di browser kamu dan tidak diunggah ke server mana pun.</p>
+  <h1>Vector File Converter</h1>
+  <p class="lead">Companion tool for the <b>Spectral Indices Explorer</b> Google Earth Engine app. Select a vector file from your computer and get GeoJSON text that is ready to paste into the app. Files are processed in your browser and are never uploaded to a server.</p>
 
   <div class="card">
-    <h2>1. Pilih file</h2>
+    <h2>1. Select a file</h2>
     <div id="drop">
-      <strong>Tarik file ke sini, atau klik untuk memilih</strong>
-      <span>Bisa .zip (shapefile lengkap), .geojson / .json, .gpkg (GeoPackage), atau satu set .shp + .dbf + .prj sekaligus</span>
+      <strong>Drag and drop a file here, or click to browse</strong>
+      <span>Supported: .zip (complete shapefile), .geojson / .json, .gpkg (GeoPackage), or a set of .shp + .dbf + .prj files</span>
     </div>
     <input id="file" type="file" multiple accept=".zip,.shp,.dbf,.prj,.cpg,.geojson,.json,.gpkg" hidden>
     <div id="layerBox" class="meta" style="display:none;margin-top:10px">
-      <label>Layer GeoPackage: <select id="layerSel"></select></label>
+      <label>GeoPackage layer: <select id="layerSel"></select></label>
       <div id="layerInfo"></div>
     </div>
-    <div class="meta">Shapefile sebaiknya memuat .prj supaya koordinatnya otomatis diubah ke WGS84. Tanpa .prj, data dianggap sudah WGS84.</div>
+    <div class="meta">For shapefiles, include the .prj file so coordinates are converted to WGS84 automatically. Without a .prj, the data is assumed to be in WGS84.</div>
   </div>
 
   <div class="card">
-    <h2>2. Opsi (supaya hasilnya ringan)</h2>
+    <h2>2. Options (keep the output compact)</h2>
     <div class="opts">
-      <label>Presisi koordinat <input id="prec" type="number" min="3" max="8" value="5"> desimal</label>
-      <label>Sederhanakan garis, toleransi <input id="tol" type="number" min="0" step="0.00001" value="0"> derajat</label>
-      <label><input id="keepName" type="checkbox" checked> Simpan hanya atribut nama (name / nama / id)</label>
-      <label><input id="onlyType" type="checkbox"> Buang geometri yang bukan titik / polygon</label>
+      <label>Coordinate precision <input id="prec" type="number" min="3" max="8" value="5"> decimals</label>
+      <label>Simplify geometry, tolerance <input id="tol" type="number" min="0" step="0.00001" value="0"> degrees</label>
+      <label><input id="keepName" type="checkbox" checked> Keep only the name attribute (name / nama / id)</label>
+      <label><input id="onlyType" type="checkbox"> Drop geometries other than points / polygons</label>
     </div>
-    <div class="meta">Toleransi 0 berarti tanpa penyederhanaan. Untuk polygon besar, coba 0.0001 (sekitar 10 m).</div>
+    <div class="meta">A tolerance of 0 means no simplification. For large polygons, try 0.0001 (about 10 m).</div>
   </div>
 
   <div class="card">
-    <h2>3. Salin hasil</h2>
-    <div id="status" class="meta">Belum ada file.</div>
-    <textarea id="out" readonly placeholder="Hasil GeoJSON muncul di sini"></textarea>
+    <h2>3. Copy the result</h2>
+    <div id="status" class="meta">No file selected yet.</div>
+    <textarea id="out" readonly placeholder="The GeoJSON result appears here"></textarea>
     <div class="row">
-      <button id="copy" disabled>Salin GeoJSON</button>
-      <button id="dl" class="ghost" disabled>Unduh .geojson</button>
+      <button id="copy" disabled>Copy GeoJSON</button>
+      <button id="dl" class="ghost" disabled>Download .geojson</button>
     </div>
   </div>
 
   <div class="card">
-    <h2>4. Tempel di aplikasi</h2>
+    <h2>4. Paste into the app</h2>
     <ol>
-      <li>Kembali ke Spectral Indices Explorer.</li>
-      <li>Untuk <b>polygon ROI</b>: tempel di kotak di bawah "Polygon ROI (Import)", lalu klik <i>Muat Polygon dari GeoJSON</i>.</li>
-      <li>Untuk <b>titik alert</b>: tempel di kotak "Import GeoJSON", lalu klik <i>Muat GeoJSON</i>.</li>
+      <li>Return to the Spectral Indices Explorer app.</li>
+      <li>In the <b>Upload ROI / Alert</b> panel, paste the GeoJSON into the text box.</li>
+      <li>Click <i>Load Alert Polygon (ROI)</i>. The app uses Polygon / MultiPolygon features as the ROI.</li>
     </ol>
   </div>
 </div>
@@ -89,7 +89,7 @@
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var drop = $('drop'), fileInput = $('file'), out = $('out'), status = $('status');
-  var current = null; // GeoJSON hasil mentah (sebelum opsi)
+  var current = null; // raw GeoJSON (before options are applied)
 
   function say(msg, cls) { status.className = cls || 'meta'; status.textContent = msg; }
 
@@ -131,7 +131,7 @@
     return sqlPromise;
   }
 
-  // Pembaca WKB (standar, ISO, dan EWKB); hanya x,y yang disimpan
+  // WKB reader (standard, ISO, and EWKB); only x,y are kept
   function wkbReader(dv, start) {
     var o = start;
     function geom() {
@@ -158,21 +158,21 @@
         case 5: return { type: 'MultiLineString', coordinates: many().map(function (g) { return g.coordinates; }) };
         case 6: return { type: 'MultiPolygon', coordinates: many().map(function (g) { return g.coordinates; }) };
         case 7: return { type: 'GeometryCollection', geometries: many() };
-        default: throw new Error('Tipe geometri WKB ' + t + ' belum didukung');
+        default: throw new Error('Unsupported WKB geometry type ' + t);
       }
     }
     return geom;
   }
 
-  // Blob geometri GeoPackage = header (magic "GP", flags, srs_id, envelope) + WKB
+  // GeoPackage geometry blob = header (magic "GP", flags, srs_id, envelope) + WKB
   function decodeGpkgGeom(blob) {
     if (!blob || !blob.length || blob.length < 9) return null;
     var dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
     if (dv.getUint8(0) !== 0x47 || dv.getUint8(1) !== 0x50) return null;
     var flags = dv.getUint8(3);
-    if ((flags >> 4) & 1) return null; // geometri kosong
+    if ((flags >> 4) & 1) return null; // empty geometry
     var envSize = [0, 32, 48, 48, 64][(flags >> 1) & 7];
-    if (envSize === undefined) throw new Error('Header GeoPackage tidak dikenali');
+    if (envSize === undefined) throw new Error('Unrecognized GeoPackage header');
     return wkbReader(dv, 8 + envSize)();
   }
 
@@ -194,10 +194,10 @@
       var r = db.exec('SELECT definition FROM gpkg_spatial_ref_sys WHERE srs_id = ' + (srid | 0));
       if (r.length && r[0].values.length) def = r[0].values[0][0];
     }
-    if (!def || def === 'undefined') throw new Error('CRS EPSG:' + srid + ' tidak dikenali. Ekspor ke EPSG:4326 lewat QGIS.');
+    if (!def || def === 'undefined') throw new Error('CRS EPSG:' + srid + ' is not recognized. Export the data to EPSG:4326 using QGIS.');
     var tf;
     try { tf = proj4(def, 'EPSG:4326'); }
-    catch (e) { throw new Error('CRS EPSG:' + srid + ' tidak bisa dibaca. Ekspor ke EPSG:4326 lewat QGIS.'); }
+    catch (e) { throw new Error('CRS EPSG:' + srid + ' could not be read. Export the data to EPSG:4326 using QGIS.'); }
     return function (c) { var p = tf.forward([c[0], c[1]]); return [p[0], p[1]]; };
   }
 
@@ -230,30 +230,30 @@
   function loadGpkgLayer(i) {
     var L = gpkgLayers[i];
     current = normalize(readLayer(gpkgDb, L));
-    $('layerInfo').textContent = 'Tipe: ' + L.type + ' | CRS asal: EPSG:' + L.srs + (GEO_SAME.indexOf(L.srs) >= 0 || L.srs <= 0 ? ' (dipakai apa adanya)' : ' (diubah ke WGS84)');
+    $('layerInfo').textContent = 'Type: ' + L.type + ' | Source CRS: EPSG:' + L.srs + (GEO_SAME.indexOf(L.srs) >= 0 || L.srs <= 0 ? ' (used as is)' : ' (converted to WGS84)');
     render();
   }
   $('layerSel').addEventListener('change', function () {
     try { loadGpkgLayer(parseInt($('layerSel').value, 10)); }
-    catch (e) { say('Gagal membaca layer: ' + (e && e.message ? e.message : e), 'err'); }
+    catch (e) { say('Failed to read layer: ' + (e && e.message ? e.message : e), 'err'); }
   });
 
   async function handle(list) {
     var files = Array.prototype.slice.call(list || []);
     if (!files.length) return;
     out.value = ''; current = null; setButtons(false);
-    say('Membaca file...', 'meta');
+    say('Reading file...', 'meta');
     try {
       var byExt = {};
       files.forEach(function (f) { byExt[ext(f)] = f; });
       $('layerBox').style.display = 'none';
       if (byExt.gpkg) {
-        say('Membaca GeoPackage...', 'meta');
+        say('Reading GeoPackage...', 'meta');
         var SQL = await getSQL();
         if (gpkgDb) { try { gpkgDb.close(); } catch (e2) {} }
         gpkgDb = new SQL.Database(new Uint8Array(await readBuf(byExt.gpkg)));
         gpkgLayers = listLayers(gpkgDb);
-        if (!gpkgLayers.length) { say('GeoPackage ini tidak punya layer vektor (fitur).', 'err'); return; }
+        if (!gpkgLayers.length) { say('This GeoPackage has no vector (feature) layers.', 'err'); return; }
         var sel = $('layerSel');
         sel.innerHTML = '';
         gpkgLayers.forEach(function (L, i) {
@@ -276,10 +276,10 @@
         if (byExt.dbf) parts.push(shp.parseDbf(await readBuf(byExt.dbf), byExt.cpg ? await readText(byExt.cpg) : undefined));
         geo = byExt.dbf ? shp.combine(parts) : { type: 'FeatureCollection', features: parts[0].map(function (g) { return { type: 'Feature', properties: {}, geometry: g }; }) };
       } else {
-        say('Tidak ada file yang dikenali. Pilih .zip, .geojson, .gpkg, atau .shp (+ .dbf + .prj).', 'err');
+        say('No supported file found. Select a .zip, .geojson, .gpkg, or .shp (+ .dbf + .prj) file.', 'err');
         return;
       }
-      // shp(zip) bisa mengembalikan array FeatureCollection bila zip berisi beberapa layer
+      // shp(zip) may return an array of FeatureCollections when the zip contains several layers
       if (Array.isArray(geo)) {
         var feats = [];
         geo.forEach(function (fc) { feats = feats.concat(fc.features || []); });
@@ -288,7 +288,7 @@
       current = normalize(geo);
       render();
     } catch (e) {
-      say('Gagal membaca file: ' + (e && e.message ? e.message : e), 'err');
+      say('Failed to read file: ' + (e && e.message ? e.message : e), 'err');
     }
   }
 
@@ -298,7 +298,7 @@
     return { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: geo }] };
   }
 
-  // ---- penyederhanaan Douglas-Peucker ----
+  // ---- Douglas-Peucker simplification ----
   function sqSegDist(p, a, b) {
     var x = a[0], y = a[1], dx = b[0] - x, dy = b[1] - y;
     if (dx !== 0 || dy !== 0) {
@@ -332,14 +332,14 @@
   function ring(r, f, tol2, closed) {
     var pts = tol2 > 0 ? dp(r, tol2) : r;
     pts = pts.map(function (c) { return roundPt(c, f); });
-    if (closed && pts.length < 4) return null; // ring rusak
+    if (closed && pts.length < 4) return null; // invalid ring
     return pts;
   }
   function polyCoords(p, f, tol2) {
     var res = [];
     for (var i = 0; i < p.length; i++) {
       var r = ring(p[i], f, tol2, true);
-      if (r) res.push(r); else if (i === 0) return null; // ring luar hilang
+      if (r) res.push(r); else if (i === 0) return null; // outer ring lost
     }
     return res;
   }
@@ -353,7 +353,7 @@
       case 'MultiPolygon':
         var mp = g.coordinates.map(function (p) { return polyCoords(p, f, tol2); }).filter(Boolean);
         return mp.length ? { type: 'MultiPolygon', coordinates: mp } : null;
-      default: return g; // garis dll dibiarkan (nanti disaring oleh opsi)
+      default: return g; // lines etc. are kept (filtered later by the options)
     }
   }
 
@@ -390,19 +390,20 @@
     setButtons(feats.length > 0);
 
     var kb = Math.round(txt.length / 1024);
-    var msg = feats.length + ' fitur (' + counts.Polygon + ' polygon, ' + counts.Point + ' titik' +
-              (counts.Lain ? ', ' + counts.Lain + ' geometri lain' : '') + '), ukuran ' + kb + ' KB.';
+    var msg = feats.length + ' features (' + counts.Polygon + ' polygons, ' + counts.Point + ' points' +
+              (counts.Lain ? ', ' + counts.Lain + ' other geometries' : '') + '), size ' + kb + ' KB.';
     var cls = 'ok';
-    if (feats.length === 0) { msg = 'Tidak ada fitur yang bisa dipakai.'; cls = 'err'; }
-    else if (counts.Lain) { msg += ' Aplikasi hanya membaca titik dan polygon; geometri lain akan dilewati.'; cls = 'warn'; }
-    if (kb > 500) { msg += ' Cukup besar untuk ditempel di aplikasi GEE. Coba naikkan toleransi penyederhanaan atau kurangi presisi.'; cls = 'warn'; }
+    if (feats.length === 0) { msg = 'No usable features found.'; cls = 'err'; }
+    else if (counts.Polygon === 0) { msg += ' No polygons found. The app uses Polygon / MultiPolygon features as the ROI.'; cls = 'warn'; }
+    else if (counts.Point || counts.Lain) { msg += ' Points and other non-polygon geometries are ignored by the app.'; cls = 'warn'; }
+    if (kb > 500) { msg += ' This is large to paste into the GEE app. Try a higher simplification tolerance or a lower coordinate precision.'; cls = 'warn'; }
     say(msg, cls);
   }
 
   function setButtons(on) { $('copy').disabled = !on; $('dl').disabled = !on; }
 
   $('copy').addEventListener('click', function () {
-    var done = function () { say('GeoJSON tersalin. Tempel di aplikasi GEE (Ctrl+V).', 'ok'); };
+    var done = function () { say('GeoJSON copied. Paste it into the GEE app (Ctrl+V).', 'ok'); };
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(out.value).then(done, function () { out.select(); document.execCommand('copy'); done(); });
     } else { out.select(); document.execCommand('copy'); done(); }
@@ -410,7 +411,7 @@
   $('dl').addEventListener('click', function () {
     var blob = new Blob([out.value], { type: 'application/geo+json' });
     var a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = 'hasil_konversi.geojson';
+    a.href = URL.createObjectURL(blob); a.download = 'converted.geojson';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
   });
