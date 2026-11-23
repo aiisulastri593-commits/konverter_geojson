@@ -23,6 +23,7 @@
   .opts { display:grid; grid-template-columns:1fr 1fr; gap:10px 18px; font-size:14px; }
   .opts label { display:flex; align-items:center; gap:8px; }
   .opts input[type=number] { width:80px; padding:4px 6px; border:1px solid var(--line); border-radius:6px; }
+  .opts select { padding:4px 6px; border:1px solid var(--line); border-radius:6px; max-width:100%; }
   @media (max-width:560px){ .opts { grid-template-columns:1fr; } }
   #status { font-size:14px; line-height:1.5; }
   .ok { color:#1b7f3b; } .warn { color:#b45309; } .err { color:#b91c1c; }
@@ -38,7 +39,7 @@
 <body>
 <div class="wrap">
   <h1>Vector File Converter</h1>
-  <p class="lead">Companion tool for the <b>Spectral Indices Explorer</b> Google Earth Engine app. Select a vector file from your computer and get GeoJSON text that is ready to paste into the app. Files are processed in your browser and are never uploaded to a server.</p>
+  <p class="lead">Companion tool for the <b>Spectral Indices Explorer</b> Google Earth Engine app. Select a vector file from your computer and get GeoJSON text that is ready to paste into the app. Geometry and attributes are kept as in the source file (no clip, no dissolve). Files are processed in your browser and are never uploaded to a server.</p>
 
   <div class="card">
     <h2>1. Select a file</h2>
@@ -55,14 +56,20 @@
   </div>
 
   <div class="card">
-    <h2>2. Options (keep the output compact)</h2>
+    <h2>2. Options</h2>
     <div class="opts">
-      <label>Coordinate precision <input id="prec" type="number" min="3" max="8" value="5"> decimals</label>
+      <label>Coordinate precision <input id="prec" type="number" min="3" max="8" value="7"> decimals</label>
       <label>Simplify geometry, tolerance <input id="tol" type="number" min="0" step="0.00001" value="0"> degrees</label>
-      <label><input id="keepName" type="checkbox" checked> Keep only the name attribute (name / nama / id)</label>
+      <label>Attributes
+        <select id="attrMode">
+          <option value="all" selected>Keep all (needed for the alert popup)</option>
+          <option value="name">Name only (name / nama / id)</option>
+          <option value="none">None</option>
+        </select>
+      </label>
       <label><input id="onlyType" type="checkbox"> Drop geometries other than points / polygons</label>
     </div>
-    <div class="meta">A tolerance of 0 means no simplification. For large polygons, try 0.0001 (about 10 m).</div>
+    <div class="meta">Defaults keep the original shape and all attributes: 7 decimals is about 1 cm and tolerance 0 means no simplification. Only lower the precision or raise the tolerance if the output is too large to paste (for large polygons try 0.0001, about 10 m, which changes the shape slightly).</div>
   </div>
 
   <div class="card">
@@ -81,6 +88,7 @@
       <li>Return to the Spectral Indices Explorer app.</li>
       <li>In the <b>Upload ROI / Alert</b> panel, paste the GeoJSON into the text box.</li>
       <li>Click <i>Load Alert Polygon (ROI)</i>. The app uses Polygon / MultiPolygon features as the ROI.</li>
+      <li>Click a polygon on the map to open the alert popup (attributes, area, before / after imagery). For before / after imagery, the file needs a date attribute in YYYY-MM-DD format.</li>
     </ol>
   </div>
 </div>
@@ -90,6 +98,9 @@
   var $ = function (id) { return document.getElementById(id); };
   var drop = $('drop'), fileInput = $('file'), out = $('out'), status = $('status');
   var current = null; // raw GeoJSON (before options are applied)
+
+  // Same key pattern the GEE app uses to find the alert date attribute
+  var DATE_KEY = /date|tanggal|tgl|detect|terdeteksi|time/i;
 
   function say(msg, cls) { status.className = cls || 'meta'; status.textContent = msg; }
 
@@ -101,7 +112,7 @@
     handle(e.dataTransfer.files);
   });
   fileInput.addEventListener('change', function () { handle(fileInput.files); });
-  ['prec', 'tol', 'keepName', 'onlyType'].forEach(function (id) {
+  ['prec', 'tol', 'attrMode', 'onlyType'].forEach(function (id) {
     $(id).addEventListener('change', render);
   });
 
@@ -298,7 +309,7 @@
     return { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: geo }] };
   }
 
-  // ---- Douglas-Peucker simplification ----
+  // ---- Douglas-Peucker simplification (only used when tolerance > 0) ----
   function sqSegDist(p, a, b) {
     var x = a[0], y = a[1], dx = b[0] - x, dy = b[1] - y;
     if (dx !== 0 || dy !== 0) {
@@ -357,17 +368,34 @@
     }
   }
 
+  // ---- Attribute cleaning: primitives only; dates in date-like fields are normalized to YYYY-MM-DD ----
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  function cleanVal(k, v) {
+    if (v === null || v === undefined || v === '') return undefined;
+    if (v instanceof Date) return isNaN(v.getTime()) ? undefined : v.getUTCFullYear() + '-' + pad2(v.getUTCMonth() + 1) + '-' + pad2(v.getUTCDate());
+    if (typeof v === 'bigint') return Number(v);
+    if (typeof v === 'object') return undefined;
+    if (DATE_KEY.test(k)) {
+      var s = String(v);
+      if (/^\d{8}$/.test(s) && +s.slice(0, 4) >= 1900 && +s.slice(0, 4) <= 2100) {
+        return s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6, 8);   // 20240320 -> 2024-03-20
+      }
+    }
+    return v;
+  }
+
   function render() {
     if (!current) return;
-    var prec = Math.min(8, Math.max(3, parseInt($('prec').value, 10) || 5));
+    var prec = Math.min(8, Math.max(3, parseInt($('prec').value, 10) || 7));
     var f = Math.pow(10, prec);
     var tol = Math.max(0, parseFloat($('tol').value) || 0);
     var tol2 = tol * tol;
-    var keepName = $('keepName').checked, onlyType = $('onlyType').checked;
+    var attrMode = $('attrMode').value, onlyType = $('onlyType').checked;
     var okTypes = { Point: 1, MultiPoint: 1, Polygon: 1, MultiPolygon: 1 };
 
-    var counts = { Point: 0, Polygon: 0, Lain: 0 };
+    var counts = { Point: 0, Polygon: 0, Other: 0 };
     var feats = [];
+    var dateKey = null, dateOk = 0, dateBad = 0, attrKeys = {};
     current.features.forEach(function (ft) {
       var g = processGeom(ft.geometry, f, tol2);
       if (!g) return;
@@ -375,12 +403,23 @@
       if (onlyType && !isOk) return;
       if (g.type === 'Point' || g.type === 'MultiPoint') counts.Point++;
       else if (g.type === 'Polygon' || g.type === 'MultiPolygon') counts.Polygon++;
-      else counts.Lain++;
-      var props = ft.properties || {};
-      if (keepName) {
-        var nm = props.name || props.Name || props.NAME || props.nama || props.Nama || props.NAMA || props.id || props.ID;
+      else counts.Other++;
+
+      var src = ft.properties || {}, props = {};
+      if (attrMode === 'all') {
+        Object.keys(src).forEach(function (k) {
+          var v = cleanVal(k, src[k]);
+          if (v !== undefined) { props[k] = v; attrKeys[k] = 1; }
+        });
+      } else if (attrMode === 'name') {
+        var nm = src.name || src.Name || src.NAME || src.nama || src.Nama || src.NAMA || src.id || src.ID;
         props = nm !== undefined && nm !== null && nm !== '' ? { name: String(nm) } : {};
       }
+      Object.keys(props).forEach(function (k) {
+        if (!DATE_KEY.test(k)) return;
+        if (typeof props[k] === 'string' && /^\d{4}-\d{2}-\d{2}/.test(props[k])) { dateOk++; if (!dateKey) dateKey = k; }
+        else dateBad++;
+      });
       feats.push({ type: 'Feature', properties: props, geometry: g });
     });
 
@@ -391,11 +430,25 @@
 
     var kb = Math.round(txt.length / 1024);
     var msg = feats.length + ' features (' + counts.Polygon + ' polygons, ' + counts.Point + ' points' +
-              (counts.Lain ? ', ' + counts.Lain + ' other geometries' : '') + '), size ' + kb + ' KB.';
+              (counts.Other ? ', ' + counts.Other + ' other geometries' : '') + '), size ' + kb + ' KB.';
     var cls = 'ok';
     if (feats.length === 0) { msg = 'No usable features found.'; cls = 'err'; }
     else if (counts.Polygon === 0) { msg += ' No polygons found. The app uses Polygon / MultiPolygon features as the ROI.'; cls = 'warn'; }
-    else if (counts.Point || counts.Lain) { msg += ' Points and other non-polygon geometries are ignored by the app.'; cls = 'warn'; }
+    else if (counts.Point || counts.Other) { msg += ' Points and other non-polygon geometries are ignored by the app.'; cls = 'warn'; }
+
+    if (feats.length > 0 && counts.Polygon > 0) {
+      if (attrMode !== 'all') {
+        msg += ' Attributes are ' + (attrMode === 'name' ? 'reduced to the name only' : 'removed') + '; the alert popup in the app will show little or no information.';
+        cls = 'warn';
+      } else {
+        var nk = Object.keys(attrKeys).length;
+        msg += ' ' + nk + ' attribute field' + (nk === 1 ? '' : 's') + ' kept.';
+        if (dateOk > 0) msg += ' Date field "' + dateKey + '" found, so the popup can show before / after imagery.';
+        else if (dateBad > 0) { msg += ' A date-like field was found but it is not in YYYY-MM-DD format, so the popup will show a composite only.'; cls = 'warn'; }
+        else { msg += ' No date field found; the popup will show a composite of the date range in the app.'; }
+        if (nk > 30) { msg += ' The app reads at most 30 attributes per feature.'; cls = 'warn'; }
+      }
+    }
     if (kb > 500) { msg += ' This is large to paste into the GEE app. Try a higher simplification tolerance or a lower coordinate precision.'; cls = 'warn'; }
     say(msg, cls);
   }
